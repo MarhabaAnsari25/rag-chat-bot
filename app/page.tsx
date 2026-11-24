@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useUploadedFiles } from "@/components/useUploadedFiles";
 
 const CHAT_STORAGE_KEY = "rag-chat-history";
@@ -26,6 +27,8 @@ export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState("");
   const [historyReady, setHistoryReady] = useState(false);
   const [storageError, setStorageError] = useState("");
+  const [streamingId, setStreamingId] = useState<string | null>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const { files, error: filesError, loading: filesLoading } = useUploadedFiles();
 
   useEffect(() => {
@@ -43,6 +46,12 @@ export default function ChatPage() {
       setStorageError("This browser could not save the conversation.");
     }
   }, [historyReady, messages]);
+
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread || !loading) return;
+    thread.scrollTop = thread.scrollHeight;
+  }, [messages, loading, streamingId]);
 
   function clearChat() {
     if (!historyReady || messages.length === 0 || loading) return;
@@ -63,6 +72,8 @@ export default function ChatPage() {
       { id: crypto.randomUUID(), role: "user", content: message },
     ]);
 
+    const assistantId = crypto.randomUUID();
+
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -76,29 +87,59 @@ export default function ChatPage() {
           ...(selectedFile ? { filename: selectedFile } : {}),
         }),
       });
-      const data = (await response.json()) as {
-        answer?: string;
-        sources?: Source[];
-        error?: string;
-      };
+      const contentType = response.headers.get("content-type") ?? "";
 
-      const answer = data.answer;
-      if (!response.ok || !answer) {
+      if (!response.ok || contentType.includes("application/json")) {
+        const data = (await response.json()) as { error?: string };
         throw new Error(data.error || "The chat request failed.");
       }
 
-      setMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: answer,
-          sources: data.sources ?? [],
-        },
-      ]);
+      flushSync(() => {
+        setStreamingId(assistantId);
+        setMessages((current) => [
+          ...current,
+          { id: assistantId, role: "assistant", content: "" },
+        ]);
+      });
+
+      let sawText = false;
+      let streamError = "";
+      await readChatStream(response, async (event) => {
+        if (event.type === "delta" && typeof event.text === "string" && event.text.length > 0) {
+          sawText = true;
+          setMessages((current) =>
+            current.map((item) =>
+              item.id === assistantId
+                ? { ...item, content: item.content + event.text }
+                : item,
+            ),
+          );
+          await nextPaint();
+          return;
+        }
+
+        if (event.type === "sources" && Array.isArray(event.sources)) {
+          const sources = event.sources.filter(isSource);
+          setMessages((current) =>
+            current.map((item) =>
+              item.id === assistantId ? { ...item, sources } : item,
+            ),
+          );
+          return;
+        }
+
+        if (event.type === "error") streamError = event.error;
+      });
+
+      if (streamError) throw new Error(streamError);
+      if (!sawText) throw new Error("Gemini returned an empty answer.");
     } catch (caught) {
+      setMessages((current) =>
+        current.filter((item) => item.id !== assistantId || item.content.trim().length > 0),
+      );
       setError(caught instanceof Error ? caught.message : "The chat request failed.");
     } finally {
+      setStreamingId(null);
       setLoading(false);
     }
   }
@@ -161,7 +202,10 @@ export default function ChatPage() {
         </p>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto rounded-2xl border border-white/10 bg-[#12181e] p-4">
+      <div
+        ref={threadRef}
+        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto rounded-2xl border border-white/10 bg-[#12181e] p-4"
+      >
         {!historyReady ? (
           <p className="m-auto text-sm text-zinc-400" role="status">
             Loading conversation...
@@ -181,7 +225,16 @@ export default function ChatPage() {
                   : "bg-white/5 text-zinc-100"
               }`}
             >
-              <p className="whitespace-pre-wrap">{message.content}</p>
+              {message.id === streamingId && message.content.length === 0 ? (
+                <TypingIndicator />
+              ) : (
+                <p className="whitespace-pre-wrap">
+                  {message.content}
+                  {message.id === streamingId ? (
+                    <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-[#3dd6c6] align-middle" />
+                  ) : null}
+                </p>
+              )}
               {message.sources && message.sources.length > 0 ? (
                 <ul className="mt-3 space-y-2 border-t border-white/10 pt-3 text-xs text-zinc-400">
                   {message.sources.map((source, index) => (
@@ -200,7 +253,7 @@ export default function ChatPage() {
             </article>
           ))
         )}
-        {loading ? (
+        {loading && !streamingId ? (
           <p className="text-sm text-zinc-400" role="status">
             {selectedFile ? `Looking through ${selectedFile}...` : "Looking through your files..."}
           </p>
@@ -237,6 +290,58 @@ export default function ChatPage() {
         </div>
       </form>
     </main>
+  );
+}
+
+type ChatEvent =
+  | { type: "delta"; text: string }
+  | { type: "sources"; sources: Source[] }
+  | { type: "done" }
+  | { type: "error"; error: string };
+
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
+async function readChatStream(
+  response: Response,
+  onEvent: (event: ChatEvent) => void | Promise<void>,
+) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("The chat response could not be read.");
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+
+    for (const part of parts) {
+      const line = part.split("\n").find((item) => item.startsWith("data: "));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6)) as ChatEvent;
+      if (event.type === "done") {
+        await reader.cancel();
+        return;
+      }
+      await onEvent(event);
+    }
+  }
+}
+
+function TypingIndicator() {
+  return (
+    <span className="inline-flex h-5 items-center gap-1" role="status" aria-label="Writing a reply">
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400" />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400 [animation-delay:150ms]" />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400 [animation-delay:300ms]" />
+    </span>
   );
 }
 

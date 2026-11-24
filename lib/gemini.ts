@@ -1,7 +1,25 @@
 import { GoogleGenAI } from "@google/genai";
 
 const EMBEDDING_MODEL = "gemini-embedding-001";
-const CHAT_MODEL = "gemini-2.5-flash";
+const CHAT_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash"] as const;
+type ChatModel = (typeof CHAT_MODELS)[number];
+
+let activeChatModel: ChatModel = CHAT_MODELS[0];
+
+function chatModelsToTry(): ChatModel[] {
+  return [
+    activeChatModel,
+    ...CHAT_MODELS.filter((model) => model !== activeChatModel),
+  ];
+}
+
+function canTryAnotherModel(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /429|503|RESOURCE_EXHAUSTED|UNAVAILABLE|quota|high demand|NOT_FOUND|no longer available|not found for API version/i.test(
+    message,
+  );
+}
+
 const EMBEDDING_DIMENSIONS = 768;
 const BATCH_SIZE = 20;
 
@@ -68,30 +86,26 @@ export async function rewriteSearchQuery(
 ): Promise<string> {
   if (history.length === 0) return question;
 
-  const ai = getClient();
   const transcript = history
     .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`)
     .join("\n");
-  const response = await ai.models.generateContent({
-    model: CHAT_MODEL,
-    contents: `Conversation so far:\n${transcript}\n\nFollow-up question: ${question}`,
-    config: {
-      systemInstruction:
-        "Rewrite the follow-up question into one standalone search query that can be understood without the conversation. Resolve pronouns and references using the conversation. If the follow-up is already standalone, return it unchanged. Return only the search query, with no quotes or explanation.",
-    },
-  });
-
-  const query = response.text?.trim().replace(/^["']|["']$/g, "").trim();
+  const text = await generateChatText(
+    `Conversation so far:\n${transcript}\n\nFollow-up question: ${question}`,
+    "Rewrite the follow-up question into one standalone search query that can be understood without the conversation. Resolve pronouns and references using the conversation. If the follow-up is already standalone, return it unchanged. Return only the search query, with no quotes or explanation.",
+  );
+  const query = text.replace(/^["']|["']$/g, "").trim();
   if (!query) return question;
   return query.slice(0, 2000);
 }
 
-export async function answerQuestion(
+const ANSWER_INSTRUCTION =
+  "You answer questions using the context from the user's uploaded files. Use the recent conversation to understand follow-up questions and reply naturally. If the files do not contain the answer, say you cannot find it in the uploaded files. Keep the answer clear and concise.";
+
+function answerContents(
   question: string,
   contexts: string[],
-  history: ChatTurn[] = [],
-): Promise<string> {
-  const ai = getClient();
+  history: ChatTurn[],
+): string {
   const contextBlock =
     contexts.length > 0
       ? contexts.map((chunk, index) => `[${index + 1}] ${chunk}`).join("\n\n")
@@ -103,21 +117,85 @@ export async function answerQuestion(
           .join("\n")}\n\n`
       : "";
 
-  const response = await ai.models.generateContent({
-    model: CHAT_MODEL,
-    contents: `${historyBlock}Context from the uploaded files:\n${contextBlock}\n\nQuestion: ${question}`,
-    config: {
-      systemInstruction:
-        "You answer questions using the context from the user's uploaded files. Use the recent conversation to understand follow-up questions and reply naturally. If the files do not contain the answer, say you cannot find it in the uploaded files. Keep the answer clear and concise.",
-    },
-  });
+  return `${historyBlock}Context from the uploaded files:\n${contextBlock}\n\nQuestion: ${question}`;
+}
 
-  const text = response.text?.trim();
+export async function answerQuestion(
+  question: string,
+  contexts: string[],
+  history: ChatTurn[] = [],
+): Promise<string> {
+  const text = await generateChatText(
+    answerContents(question, contexts, history),
+    ANSWER_INSTRUCTION,
+  );
   if (!text) {
     throw new Error("Gemini returned an empty answer.");
   }
 
   return text;
+}
+
+export async function* streamAnswer(
+  question: string,
+  contexts: string[],
+  history: ChatTurn[] = [],
+): AsyncGenerator<string> {
+  const ai = getClient();
+  const contents = answerContents(question, contexts, history);
+  let lastError: unknown;
+
+  for (const model of chatModelsToTry()) {
+    let started = false;
+    try {
+      const stream = await ai.models.generateContentStream({
+        model,
+        contents,
+        config: { systemInstruction: ANSWER_INSTRUCTION },
+      });
+
+      for await (const chunk of stream) {
+        if (!chunk.text) continue;
+        started = true;
+        yield chunk.text;
+      }
+
+      activeChatModel = model;
+      return;
+    } catch (error) {
+      lastError = error;
+      if (started || !canTryAnotherModel(error)) throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+async function generateChatText(
+  contents: string,
+  systemInstruction: string,
+): Promise<string> {
+  const ai = getClient();
+  let lastError: unknown;
+
+  for (const model of chatModelsToTry()) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents,
+        config: { systemInstruction },
+      });
+      activeChatModel = model;
+      return response.text?.trim() ?? "";
+    } catch (error) {
+      lastError = error;
+      if (!canTryAnotherModel(error)) throw error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Gemini could not answer this question.");
 }
 
 function normalize(values: number[]): number[] {

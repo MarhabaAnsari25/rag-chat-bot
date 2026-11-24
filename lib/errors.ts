@@ -3,15 +3,25 @@ export const databaseUpdateMessage =
 
 export function readableError(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : fallback;
+  const message = apiMessage(raw) || raw || fallback;
 
-  try {
-    const parsed = JSON.parse(raw) as { error?: { message?: string } };
-    if (parsed.error?.message) return parsed.error.message;
-  } catch {
-    // The message is already plain text.
+  if (/quota exceeded|rate limit|RESOURCE_EXHAUSTED/i.test(message)) {
+    return "The Gemini free-tier limit has been reached. Please try again later.";
   }
 
-  return raw || fallback;
+  return message;
+}
+
+function apiMessage(raw: string): string | null {
+  const start = raw.indexOf("{");
+  if (start === -1) return null;
+
+  try {
+    const parsed = JSON.parse(raw.slice(start)) as { error?: { message?: string } };
+    return parsed.error?.message ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function withDatabaseHint(error: unknown, fallback: string): string {

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withDatabaseHint } from "@/lib/errors";
-import { answerQuestion, embedTexts, rewriteSearchQuery, type ChatTurn } from "@/lib/gemini";
+import { embedTexts, rewriteSearchQuery, streamAnswer, type ChatTurn } from "@/lib/gemini";
 import { getSupabase, type DocumentMatch } from "@/lib/supabase";
 
 export const maxDuration = 60;
@@ -60,19 +60,42 @@ export async function POST(request: Request) {
     }
 
     const matches = (data ?? []) as DocumentMatch[];
-    const answer = await answerQuestion(
-      message,
-      matches.map((match) => match.content),
-      history,
-    );
+    const sources = matches.map((match) => ({
+      filename: match.metadata?.filename ?? "Uploaded file",
+      similarity: match.similarity,
+      excerpt: match.content.slice(0, 240),
+    }));
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (event: unknown) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        };
 
-    return NextResponse.json({
-      answer,
-      sources: matches.map((match) => ({
-        filename: match.metadata?.filename ?? "Uploaded file",
-        similarity: match.similarity,
-        excerpt: match.content.slice(0, 240),
-      })),
+        try {
+          for await (const text of streamAnswer(
+            message,
+            matches.map((match) => match.content),
+            history,
+          )) {
+            send({ type: "delta", text });
+          }
+          send({ type: "sources", sources });
+          send({ type: "done" });
+          controller.close();
+        } catch (error) {
+          send({ type: "error", error: withDatabaseHint(error, "Chat failed.") });
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+      },
     });
   } catch (error) {
     return NextResponse.json(
