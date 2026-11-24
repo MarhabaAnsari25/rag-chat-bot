@@ -69,6 +69,10 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message,
+          history: messages.slice(-5).map((item) => ({
+            role: item.role,
+            content: item.content,
+          })),
           ...(selectedFile ? { filename: selectedFile } : {}),
         }),
       });

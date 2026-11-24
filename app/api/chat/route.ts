@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withDatabaseHint } from "@/lib/errors";
-import { answerQuestion, embedTexts } from "@/lib/gemini";
+import { answerQuestion, embedTexts, rewriteSearchQuery, type ChatTurn } from "@/lib/gemini";
 import { getSupabase, type DocumentMatch } from "@/lib/supabase";
 
 export const maxDuration = 60;
@@ -22,6 +22,7 @@ export async function POST(request: Request) {
       typeof body.filename === "string"
         ? body.filename.trim()
         : "";
+    const history = readHistory(body);
 
     if (!message) {
       return NextResponse.json(
@@ -44,7 +45,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const [queryEmbedding] = await embedTexts([message], "RETRIEVAL_QUERY");
+    const searchQuery = await rewriteSearchQuery(message, history);
+    const [queryEmbedding] = await embedTexts([searchQuery], "RETRIEVAL_QUERY");
     const supabase = getSupabase();
     const { data, error } = await supabase.rpc("match_documents", {
       query_embedding: queryEmbedding,
@@ -61,6 +63,7 @@ export async function POST(request: Request) {
     const answer = await answerQuestion(
       message,
       matches.map((match) => match.content),
+      history,
     );
 
     return NextResponse.json({
@@ -77,4 +80,22 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+}
+
+function readHistory(body: unknown): ChatTurn[] {
+  if (typeof body !== "object" || body === null || !("history" in body)) return [];
+  if (!Array.isArray(body.history)) return [];
+
+  const turns: ChatTurn[] = [];
+  for (const item of body.history.slice(-5)) {
+    if (typeof item !== "object" || item === null) continue;
+    if (!("role" in item) || !("content" in item)) continue;
+    if (item.role !== "user" && item.role !== "assistant") continue;
+    if (typeof item.content !== "string") continue;
+    const content = item.content.trim().slice(0, 4000);
+    if (!content) continue;
+    turns.push({ role: item.role, content });
+  }
+
+  return turns;
 }

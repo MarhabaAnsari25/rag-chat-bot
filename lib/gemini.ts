@@ -7,6 +7,11 @@ const BATCH_SIZE = 20;
 
 type EmbeddingTask = "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY";
 
+export type ChatTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 function getClient() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -57,22 +62,53 @@ export async function embedTexts(
   return vectors;
 }
 
+export async function rewriteSearchQuery(
+  question: string,
+  history: ChatTurn[],
+): Promise<string> {
+  if (history.length === 0) return question;
+
+  const ai = getClient();
+  const transcript = history
+    .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`)
+    .join("\n");
+  const response = await ai.models.generateContent({
+    model: CHAT_MODEL,
+    contents: `Conversation so far:\n${transcript}\n\nFollow-up question: ${question}`,
+    config: {
+      systemInstruction:
+        "Rewrite the follow-up question into one standalone search query that can be understood without the conversation. Resolve pronouns and references using the conversation. If the follow-up is already standalone, return it unchanged. Return only the search query, with no quotes or explanation.",
+    },
+  });
+
+  const query = response.text?.trim().replace(/^["']|["']$/g, "").trim();
+  if (!query) return question;
+  return query.slice(0, 2000);
+}
+
 export async function answerQuestion(
   question: string,
   contexts: string[],
+  history: ChatTurn[] = [],
 ): Promise<string> {
   const ai = getClient();
   const contextBlock =
     contexts.length > 0
       ? contexts.map((chunk, index) => `[${index + 1}] ${chunk}`).join("\n\n")
       : "No matching text was found in the uploaded files.";
+  const historyBlock =
+    history.length > 0
+      ? `Recent conversation:\n${history
+          .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`)
+          .join("\n")}\n\n`
+      : "";
 
   const response = await ai.models.generateContent({
     model: CHAT_MODEL,
-    contents: `Context from the uploaded files:\n${contextBlock}\n\nQuestion: ${question}`,
+    contents: `${historyBlock}Context from the uploaded files:\n${contextBlock}\n\nQuestion: ${question}`,
     config: {
       systemInstruction:
-        "You answer questions using only the context from the user's uploaded files. If the context does not contain the answer, say you cannot find it in the uploaded files. Keep the answer clear and concise.",
+        "You answer questions using the context from the user's uploaded files. Use the recent conversation to understand follow-up questions and reply naturally. If the files do not contain the answer, say you cannot find it in the uploaded files. Keep the answer clear and concise.",
     },
   });
 
