@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useUploadedFiles } from "@/components/useUploadedFiles";
+
+const CHAT_STORAGE_KEY = "rag-chat-history";
 
 type Source = {
   filename: string;
@@ -22,7 +24,31 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selectedFile, setSelectedFile] = useState("");
+  const [historyReady, setHistoryReady] = useState(false);
+  const [storageError, setStorageError] = useState("");
   const { files, error: filesError, loading: filesLoading } = useUploadedFiles();
+
+  useEffect(() => {
+    setMessages(readStoredMessages());
+    setHistoryReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!historyReady) return;
+
+    try {
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
+      setStorageError("");
+    } catch {
+      setStorageError("This browser could not save the conversation.");
+    }
+  }, [historyReady, messages]);
+
+  function clearChat() {
+    if (!historyReady || messages.length === 0 || loading) return;
+    setMessages([]);
+    setError("");
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -84,24 +110,34 @@ export default function ChatPage() {
               : "Ask a question about the files you uploaded."}
           </p>
         </div>
-        <div className="w-full sm:w-72">
-          <label htmlFor="file-filter" className="mb-1.5 block text-xs font-medium text-zinc-400">
-            Search in
-          </label>
-          <select
-            id="file-filter"
-            value={selectedFile}
-            onChange={(event) => setSelectedFile(event.target.value)}
-            disabled={filesLoading}
-            className="h-10 w-full rounded-full border border-white/10 bg-[#12181e] px-4 text-sm text-white outline-none scheme-dark focus:border-[#3dd6c6] disabled:opacity-60"
+        <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-end">
+          <div className="w-full sm:w-72">
+            <label htmlFor="file-filter" className="mb-1.5 block text-xs font-medium text-zinc-400">
+              Search in
+            </label>
+            <select
+              id="file-filter"
+              value={selectedFile}
+              onChange={(event) => setSelectedFile(event.target.value)}
+              disabled={filesLoading}
+              className="h-10 w-full rounded-full border border-white/10 bg-[#12181e] px-4 text-sm text-white outline-none scheme-dark focus:border-[#3dd6c6] disabled:opacity-60"
+            >
+              <option value="">All files</option>
+              {files.map((file) => (
+                <option key={file.filename} value={file.filename}>
+                  {file.filename}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={clearChat}
+            disabled={!historyReady || messages.length === 0 || loading}
+            className="h-10 w-fit shrink-0 rounded-full border border-white/15 px-4 text-sm font-medium text-zinc-200 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <option value="">All files</option>
-            {files.map((file) => (
-              <option key={file.filename} value={file.filename}>
-                {file.filename}
-              </option>
-            ))}
-          </select>
+            Clear chat
+          </button>
         </div>
       </div>
       {filesError ? (
@@ -112,9 +148,21 @@ export default function ChatPage() {
           {filesError}
         </p>
       ) : null}
+      {storageError ? (
+        <p
+          className="mb-4 rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm text-red-200"
+          role="alert"
+        >
+          {storageError}
+        </p>
+      ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto rounded-2xl border border-white/10 bg-[#12181e] p-4">
-        {messages.length === 0 ? (
+        {!historyReady ? (
+          <p className="m-auto text-sm text-zinc-400" role="status">
+            Loading conversation...
+          </p>
+        ) : messages.length === 0 ? (
           <p className="m-auto max-w-sm text-center text-sm text-zinc-400">
             Nothing here yet. Upload a PDF or TXT file first, then ask a question
             about it.
@@ -185,5 +233,39 @@ export default function ChatPage() {
         </div>
       </form>
     </main>
+  );
+}
+
+function readStoredMessages(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isChatMessage);
+  } catch {
+    return [];
+  }
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("id" in value) || !("role" in value) || !("content" in value)) return false;
+  const message = value as ChatMessage;
+  if (typeof message.id !== "string" || message.id.length === 0) return false;
+  if (message.role !== "user" && message.role !== "assistant") return false;
+  if (typeof message.content !== "string") return false;
+  if (message.sources === undefined) return true;
+  return Array.isArray(message.sources) && message.sources.every(isSource);
+}
+
+function isSource(value: unknown): value is Source {
+  if (typeof value !== "object" || value === null) return false;
+  const source = value as Source;
+  return (
+    typeof source.filename === "string" &&
+    typeof source.similarity === "number" &&
+    Number.isFinite(source.similarity) &&
+    typeof source.excerpt === "string"
   );
 }
