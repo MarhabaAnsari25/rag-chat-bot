@@ -1,0 +1,80 @@
+import { NextResponse } from "next/server";
+import { withDatabaseHint } from "@/lib/errors";
+import { answerQuestion, embedTexts } from "@/lib/gemini";
+import { getSupabase, type DocumentMatch } from "@/lib/supabase";
+
+export const maxDuration = 60;
+
+export async function POST(request: Request) {
+  try {
+    const body: unknown = await request.json();
+    const message =
+      typeof body === "object" &&
+      body !== null &&
+      "message" in body &&
+      typeof body.message === "string"
+        ? body.message.trim()
+        : "";
+    const filename =
+      typeof body === "object" &&
+      body !== null &&
+      "filename" in body &&
+      typeof body.filename === "string"
+        ? body.filename.trim()
+        : "";
+
+    if (!message) {
+      return NextResponse.json(
+        { error: "Please type a question." },
+        { status: 400 },
+      );
+    }
+
+    if (message.length > 2000) {
+      return NextResponse.json(
+        { error: "Please keep your question under 2000 characters." },
+        { status: 400 },
+      );
+    }
+
+    if (filename.length > 500 || filename.includes("\0")) {
+      return NextResponse.json(
+        { error: "That file name is not valid." },
+        { status: 400 },
+      );
+    }
+
+    const [queryEmbedding] = await embedTexts([message], "RETRIEVAL_QUERY");
+    const supabase = getSupabase();
+    const { data, error } = await supabase.rpc("match_documents", {
+      query_embedding: queryEmbedding,
+      match_threshold: 0.3,
+      match_count: 5,
+      ...(filename ? { filter_filename: filename } : {}),
+    });
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const matches = (data ?? []) as DocumentMatch[];
+    const answer = await answerQuestion(
+      message,
+      matches.map((match) => match.content),
+    );
+
+    return NextResponse.json({
+      answer,
+      sources: matches.map((match) => ({
+        filename: match.metadata?.filename ?? "Uploaded file",
+        similarity: match.similarity,
+        excerpt: match.content.slice(0, 240),
+      })),
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: withDatabaseHint(error, "Chat failed.") },
+      { status: 500 },
+    );
+  }
+}
