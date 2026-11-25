@@ -31,33 +31,46 @@ export default function ChatPage() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const activeFileRef = useRef("");
   const { files, error: filesError, loading: filesLoading } = useUploadedFiles();
 
   useEffect(() => {
-    setMessages(readStoredMessages());
+    activeFileRef.current = "";
+    setMessages(readConversation(""));
     setHistoryReady(true);
   }, []);
 
   useEffect(() => {
-    if (!historyReady) return;
+    if (!historyReady || activeFileRef.current !== selectedFile) return;
 
     try {
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
+      writeConversation(selectedFile, messages);
       setStorageError("");
     } catch {
       setStorageError("This browser could not save the conversation.");
     }
-  }, [historyReady, messages]);
+  }, [historyReady, messages, selectedFile]);
 
   useEffect(() => {
     const thread = threadRef.current;
-    if (!thread || !loading) return;
-    thread.scrollTop = thread.scrollHeight;
-  }, [messages, loading, streamingId]);
+    if (!thread || (!loading && !historyReady)) return;
+    if (loading || activeFileRef.current === selectedFile) {
+      thread.scrollTop = thread.scrollHeight;
+    }
+  }, [messages, loading, streamingId, selectedFile, historyReady]);
 
   function clearChat() {
     if (!historyReady || messages.length === 0 || loading) return;
     setMessages([]);
+    setError("");
+  }
+
+  function selectFile(filename: string) {
+    if (filename === selectedFile || loading) return;
+    activeFileRef.current = filename;
+    setSelectedFile(filename);
+    setMessages(readConversation(filename));
+    setQuestion("");
     setError("");
   }
 
@@ -196,8 +209,8 @@ export default function ChatPage() {
           <h1 className="text-2xl font-semibold tracking-tight text-white">Chat</h1>
           <p className="mt-1 break-words text-sm text-zinc-400">
             {selectedFile
-              ? `Ask a question about ${selectedFile}.`
-              : "Ask a question about the files you uploaded."}
+              ? `This chat is saved for ${selectedFile}.`
+              : "This chat is for all files. Choose a file to open its own chat."}
           </p>
         </div>
         <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-end">
@@ -208,8 +221,8 @@ export default function ChatPage() {
             <select
               id="file-filter"
               value={selectedFile}
-              onChange={(event) => setSelectedFile(event.target.value)}
-              disabled={filesLoading}
+              onChange={(event) => selectFile(event.target.value)}
+              disabled={filesLoading || loading}
               className="h-10 w-full rounded-full border border-white/10 bg-[#12181e] px-4 text-sm text-white outline-none scheme-dark focus:border-[#3dd6c6] disabled:opacity-60"
             >
               <option value="">All files</option>
@@ -478,16 +491,53 @@ function TypingIndicator() {
   );
 }
 
-function readStoredMessages(): ChatMessage[] {
+type ChatLibrary = {
+  all: ChatMessage[];
+  files: Record<string, ChatMessage[]>;
+};
+
+function readConversation(filename: string): ChatMessage[] {
+  const library = readLibrary();
+  if (!filename) return library.all;
+  return library.files[filename] ?? [];
+}
+
+function writeConversation(filename: string, messages: ChatMessage[]) {
+  const library = readLibrary();
+  if (!filename) library.all = messages;
+  else library.files[filename] = messages;
+  localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(library));
+}
+
+function readLibrary(): ChatLibrary {
   try {
     const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!raw) return [];
+    if (!raw) return { all: [], files: {} };
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isChatMessage);
+
+    if (Array.isArray(parsed)) {
+      return { all: parsed.filter(isChatMessage), files: {} };
+    }
+
+    if (typeof parsed !== "object" || parsed === null) return { all: [], files: {} };
+    const record = parsed as { all?: unknown; files?: unknown };
+    return {
+      all: Array.isArray(record.all) ? record.all.filter(isChatMessage) : [],
+      files: readFileChats(record.files),
+    };
   } catch {
-    return [];
+    return { all: [], files: {} };
   }
+}
+
+function readFileChats(value: unknown): Record<string, ChatMessage[]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const files: Record<string, ChatMessage[]> = {};
+  for (const [filename, messages] of Object.entries(value)) {
+    if (!Array.isArray(messages)) continue;
+    files[filename] = messages.filter(isChatMessage);
+  }
+  return files;
 }
 
 function isChatMessage(value: unknown): value is ChatMessage {
