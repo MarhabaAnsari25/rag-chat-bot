@@ -171,6 +171,23 @@ export async function* streamAnswer(
   throw lastError;
 }
 
+export async function suggestQuestions(excerpts: string[]): Promise<string[]> {
+  const sample = excerpts
+    .slice(0, 8)
+    .map((excerpt, index) => `[${index + 1}] ${excerpt.slice(0, 700)}`)
+    .join("\n\n");
+  const text = await generateChatText(
+    sample,
+    "Write exactly 3 short questions a beginner could ask about the excerpts. Each question must stand alone, be answerable from the excerpts, and end with a question mark. Put one question on each line. Do not number the lines, mention a summary, or add any other text.",
+  );
+
+  return text
+    .split(/\n+/)
+    .map((line) => line.replace(/^\s*(?:\d+[\).\]]|[-*])\s*/, "").replace(/^["']|["']$/g, "").trim())
+    .filter((line) => line.length > 0 && line.length <= 180)
+    .slice(0, 3);
+}
+
 async function generateChatText(
   contents: string,
   systemInstruction: string,

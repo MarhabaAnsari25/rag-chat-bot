@@ -28,6 +28,8 @@ export default function ChatPage() {
   const [historyReady, setHistoryReady] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const { files, error: filesError, loading: filesLoading } = useUploadedFiles();
 
@@ -59,9 +61,47 @@ export default function ChatPage() {
     setError("");
   }
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    if (!historyReady || messages.length > 0 || filesLoading || files.length === 0) return;
+
+    const controller = new AbortController();
+    setSuggestions([]);
+    setSuggestionsLoading(true);
+
+    const params = new URLSearchParams();
+    if (selectedFile) params.set("filename", selectedFile);
+    const query = params.toString();
+
+    fetch(`/api/suggestions${query ? `?${query}` : ""}`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = (await response.json()) as { questions?: unknown; error?: string };
+        if (!response.ok) throw new Error(data.error || "Could not suggest questions.");
+        if (!Array.isArray(data.questions)) return;
+        setSuggestions(
+          data.questions
+            .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+            .slice(0, 3),
+        );
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        setSuggestions([]);
+        setError(caught instanceof Error ? caught.message : "Could not suggest questions.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSuggestionsLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [historyReady, messages.length, filesLoading, files.length, selectedFile]);
+
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const message = question.trim();
+    void ask(question);
+  }
+
+  async function ask(rawMessage: string) {
+    const message = rawMessage.trim();
     if (!message || loading) return;
 
     setQuestion("");
@@ -216,10 +256,28 @@ export default function ChatPage() {
             Loading conversation...
           </p>
         ) : messages.length === 0 ? (
-          <p className="m-auto max-w-sm text-center text-sm text-zinc-400">
-            Nothing here yet. Upload a PDF or TXT file first, then ask a question
-            about it.
-          </p>
+          filesLoading ? (
+            <p className="m-auto text-sm text-zinc-400" role="status">
+              Checking your files...
+            </p>
+          ) : files.length === 0 ? (
+            <p className="m-auto max-w-sm text-center text-sm text-zinc-400">
+              Nothing here yet. Upload a PDF, TXT, DOCX, or MD file first, then ask a
+              question about it.
+            </p>
+          ) : (
+            <Suggestions
+              questions={suggestions}
+              loading={suggestionsLoading}
+              disabled={loading}
+              onAsk={(nextQuestion) => void ask(nextQuestion)}
+              summary={
+                selectedFile
+                  ? `Summarize ${selectedFile}.`
+                  : "Summarize the uploaded documents."
+              }
+            />
+          )
         ) : (
           messages.map((message) => (
             <article
@@ -310,6 +368,53 @@ type IncomingAnswer = {
   done: boolean;
   error: string;
 };
+
+function Suggestions({
+  questions,
+  loading,
+  disabled,
+  summary,
+  onAsk,
+}: {
+  questions: string[];
+  loading: boolean;
+  disabled: boolean;
+  summary: string;
+  onAsk: (question: string) => void;
+}) {
+  return (
+    <div className="m-auto flex w-full max-w-lg flex-col items-center gap-4 text-center">
+      <p className="text-sm text-zinc-400">Try a suggestion, or type your own question.</p>
+      {loading ? (
+        <p className="text-sm text-zinc-500" role="status">
+          Finding questions in your files...
+        </p>
+      ) : (
+        <div className="flex flex-wrap justify-center gap-2" aria-label="Suggested questions">
+          {questions.map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => onAsk(item)}
+              disabled={disabled}
+              className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-left text-sm text-zinc-100 hover:border-[#3dd6c6] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => onAsk(summary)}
+        disabled={disabled}
+        className="rounded-full bg-[#3dd6c6] px-4 py-2 text-sm font-semibold text-[#06211e] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Summarize this document
+      </button>
+    </div>
+  );
+}
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
