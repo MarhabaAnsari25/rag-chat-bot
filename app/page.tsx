@@ -102,37 +102,42 @@ export default function ChatPage() {
         ]);
       });
 
-      let sawText = false;
-      let streamError = "";
-      await readChatStream(response, async (event) => {
-        if (event.type === "delta" && typeof event.text === "string" && event.text.length > 0) {
-          sawText = true;
-          setMessages((current) =>
-            current.map((item) =>
-              item.id === assistantId
-                ? { ...item, content: item.content + event.text }
-                : item,
-            ),
-          );
-          await nextPaint();
-          return;
-        }
-
-        if (event.type === "sources" && Array.isArray(event.sources)) {
-          const sources = event.sources.filter(isSource);
-          setMessages((current) =>
-            current.map((item) =>
-              item.id === assistantId ? { ...item, sources } : item,
-            ),
-          );
-          return;
-        }
-
-        if (event.type === "error") streamError = event.error;
+      const incoming: IncomingAnswer = { text: "", sources: null, done: false, error: "" };
+      const typing = typeAnswer(incoming, (content) => {
+        setMessages((current) =>
+          current.map((item) => (item.id === assistantId ? { ...item, content } : item)),
+        );
       });
 
-      if (streamError) throw new Error(streamError);
-      if (!sawText) throw new Error("Gemini returned an empty answer.");
+      try {
+        await readChatStream(response, (event) => {
+          if (event.type === "delta" && typeof event.text === "string" && event.text.length > 0) {
+            incoming.text += event.text;
+            return;
+          }
+
+          if (event.type === "sources" && Array.isArray(event.sources)) {
+            incoming.sources = event.sources.filter(isSource);
+            return;
+          }
+
+          if (event.type === "error" && event.error) incoming.error = event.error;
+        });
+      } finally {
+        incoming.done = true;
+      }
+
+      await typing;
+      if (incoming.error) throw new Error(incoming.error);
+      if (!incoming.text.trim()) throw new Error("Gemini returned an empty answer.");
+
+      if (incoming.sources && incoming.sources.length > 0) {
+        const sources = incoming.sources;
+        setStreamingId(null);
+        setMessages((current) =>
+          current.map((item) => (item.id === assistantId ? { ...item, sources } : item)),
+        );
+      }
     } catch (caught) {
       setMessages((current) =>
         current.filter((item) => item.id !== assistantId || item.content.trim().length > 0),
@@ -299,10 +304,33 @@ type ChatEvent =
   | { type: "done" }
   | { type: "error"; error: string };
 
-function nextPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => resolve());
-  });
+type IncomingAnswer = {
+  text: string;
+  sources: Source[] | null;
+  done: boolean;
+  error: string;
+};
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function typeAnswer(incoming: IncomingAnswer, publish: (content: string) => void) {
+  let shown = 0;
+
+  while (true) {
+    if (shown < incoming.text.length) {
+      const remaining = incoming.text.length - shown;
+      const count = remaining > 180 ? 4 : remaining > 70 ? 2 : 1;
+      shown += count;
+      publish(incoming.text.slice(0, shown));
+      await wait(count === 1 ? 28 : 16);
+      continue;
+    }
+
+    if (incoming.done || incoming.error) return;
+    await wait(40);
+  }
 }
 
 async function readChatStream(
