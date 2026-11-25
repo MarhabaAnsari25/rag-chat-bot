@@ -99,10 +99,6 @@ export default function UploadPage() {
 
   async function deleteFile(filename: string) {
     if (deleting) return;
-    const confirmed = window.confirm(
-      `Delete ${filename} and all of its saved chunks?`,
-    );
-    if (!confirmed) return;
 
     setDeleting(filename);
     setDeleteError("");
