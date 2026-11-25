@@ -311,20 +311,13 @@ export default function ChatPage() {
                   ) : null}
                 </p>
               )}
+              {message.role === "assistant" && message.content.trim().length > 0 && message.id !== streamingId ? (
+                <div className="mt-3 flex justify-end">
+                  <CopyAnswerButton text={message.content} />
+                </div>
+              ) : null}
               {message.sources && message.sources.length > 0 ? (
-                <ul className="mt-3 space-y-2 border-t border-white/10 pt-3 text-xs text-zinc-400">
-                  {message.sources.map((source, index) => (
-                    <li key={`${message.id}-${index}`}>
-                      <span className="font-medium text-zinc-200">
-                        {source.filename}
-                      </span>
-                      <span className="ml-2">
-                        {Math.round(source.similarity * 100)}% match
-                      </span>
-                      <p className="mt-1 line-clamp-2">{source.excerpt}</p>
-                    </li>
-                  ))}
-                </ul>
+                <SourceList messageId={message.id} sources={message.sources} />
               ) : null}
             </article>
           ))
@@ -381,6 +374,121 @@ type IncomingAnswer = {
   done: boolean;
   error: string;
 };
+
+function CopyAnswerButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyAnswer() {
+    const copiedText = await writeClipboard(text);
+    if (!copiedText) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void copyAnswer()}
+      className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-zinc-300 hover:border-[#3dd6c6] hover:text-white"
+    >
+      {copied ? "Copied" : "Copy Answer"}
+    </button>
+  );
+}
+
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.left = "-9999px";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    return copied;
+  }
+}
+
+function SourceList({ messageId, sources }: { messageId: string; sources: Source[] }) {
+  const groups = groupSources(sources);
+
+  return (
+    <div className="mt-2 border-t border-white/10 pt-2">
+      <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Sources Used</p>
+      <ul className="space-y-1.5">
+        {groups.map((group) => (
+          <SourceCard key={`${messageId}-${group.filename}`} group={group} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SourceCard({ group }: { group: SourceGroup }) {
+  const [open, setOpen] = useState(false);
+  const best = Math.round(group.chunks[0].similarity * 100);
+
+  return (
+    <li className="overflow-hidden rounded-lg border border-white/10 bg-black/20">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
+      >
+        <span className="min-w-0 flex-1 truncate text-xs text-zinc-300" title={group.filename}>
+          {group.filename}
+        </span>
+        {group.chunks.length > 1 ? (
+          <span className="shrink-0 text-[11px] text-zinc-500">{group.chunks.length} parts</span>
+        ) : null}
+        <span className="shrink-0 text-[11px] text-[#3dd6c6]">{best}%</span>
+        <span className="shrink-0 text-[11px] text-zinc-500" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open ? (
+        <ul className="space-y-2 border-t border-white/10 px-2.5 py-2">
+          {group.chunks.map((chunk, index) => (
+            <li key={index}>
+              {group.chunks.length > 1 ? (
+                <p className="mb-0.5 text-[11px] text-[#3dd6c6]">{Math.round(chunk.similarity * 100)}%</p>
+              ) : null}
+              <p className="whitespace-pre-wrap text-xs leading-5 text-zinc-400">{chunk.excerpt}</p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+type SourceGroup = {
+  filename: string;
+  chunks: Source[];
+};
+
+function groupSources(sources: Source[]): SourceGroup[] {
+  const groups = new Map<string, Source[]>();
+
+  for (const source of sources) {
+    const chunks = groups.get(source.filename) ?? [];
+    chunks.push(source);
+    groups.set(source.filename, chunks);
+  }
+
+  return [...groups.entries()]
+    .map(([filename, chunks]) => ({
+      filename,
+      chunks: [...chunks].sort((left, right) => right.similarity - left.similarity),
+    }))
+    .sort((left, right) => right.chunks[0].similarity - left.chunks[0].similarity);
+}
 
 function Suggestions({
   questions,

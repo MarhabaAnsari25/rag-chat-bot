@@ -63,7 +63,7 @@ export async function POST(request: Request) {
     const sources = matches.map((match) => ({
       filename: match.metadata?.filename ?? "Uploaded file",
       similarity: match.similarity,
-      excerpt: match.content.slice(0, 240),
+      excerpt: match.content,
     }));
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
